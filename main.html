@@ -1,0 +1,1043 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>Bukayo Saka — London Derby Run</title>
+<style>
+  html, body {
+    margin: 0; padding: 0; height: 100%;
+    background: #0b1016;
+    display: flex; align-items: center; justify-content: center;
+    overflow: hidden;
+    font-family: monospace;
+  }
+  canvas {
+    display: block;
+    image-rendering: pixelated;
+    image-rendering: crisp-edges;
+    border-radius: 10px;
+    box-shadow: 0 0 60px rgba(0,0,0,.9);
+    width: min(96vw, 960px);
+    height: auto;
+  }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<script>
+(() => {
+'use strict';
+
+/* =========================================================
+   1. CANVAS
+   ========================================================= */
+const canvas = document.getElementById('game');
+const ctx    = canvas.getContext('2d');
+const W = 960, H = 540;
+canvas.width = W;
+canvas.height = H;
+ctx.imageSmoothingEnabled = false;
+
+/* =========================================================
+   2. КОНСТАНТЫ
+   ========================================================= */
+const TOTAL_LEVELS = 4;
+const PIXEL        = 3;
+const GRAVITY      = 0.65;
+const MAX_FALL     = 17;
+const MOVE_SPEED   = 4.4;
+const JUMP_V       = -13.2;
+const COYOTE_TIME  = 7;
+const JUMP_BUFFER  = 8;
+const GROUND_Y     = 430;
+const LEVEL_TIME   = 180 * 60;
+
+/* Клубы-соперники */
+const CLUBS = [
+  { key: 'TOT', name: 'ТОТТЕНХЭМ',     short: 'TOT', tag: 'TOTTENHAM HOTSPUR',
+    shirt: '#ffffff', shorts: '#1a1a3c', accent: '#1a1a3c' },
+  { key: 'WHU', name: 'ВЕСТ ХЭМ',      short: 'WHU', tag: 'WEST HAM UNITED',
+    shirt: '#7a1a3a', shorts: '#7ec8e3', accent: '#7ec8e3' },
+  { key: 'CRY', name: 'КРИСТАЛ ПЭЛАС', short: 'CRY', tag: 'CRYSTAL PALACE',
+    shirt: '#1b3a8c', shorts: '#1b3a8c', accent: '#e01b24' },
+  { key: 'CHE', name: 'ЧЕЛСИ',         short: 'CHE', tag: 'CHELSEA FC',
+    shirt: '#1a3fa8', shorts: '#1a3fa8', accent: '#ffffff' },
+];
+
+/* =========================================================
+   3. ПАЛИТРЫ И СПРАЙТЫ
+   ========================================================= */
+const PAL_PLAYER = {
+  h: '#141414', s: '#7a4a28', e: '#111111',
+  r: '#e01b24', w: '#ffffff', b: '#101010',
+};
+
+function makeEnemyPal(club) {
+  return {
+    h: '#3b2a1c', s: '#e8b48a', e: '#111111',
+    w: club.shirt, n: club.shorts, b: '#101010',
+  };
+}
+
+/* --- Сака: 12 x 16 --- */
+const SAKA_BODY = [
+  '............',
+  '...hhhhhh...',
+  '..hhhhhhhh..',
+  '..hssssssh..',
+  '..hsessesh..',
+  '..hssssssh..',
+  '...ssssss...',
+  '..rrrrrrrr..',
+  '.rrrrrrrrrr.',
+  '.srrrrrrrrs.',
+  '..rrrrrrrr..',
+  '..wwwwwwww..',
+  '..wwwwwwww..',
+];
+const makeSaka = legs => SAKA_BODY.concat(legs);
+const SPR_SAKA_RUN = [
+  makeSaka(['..ss....ss..', '..ss....ss..', '..bb....bb..']),
+  makeSaka(['..ss...ss...', '.ss.....ss..', '.bb.....bb..']),
+];
+const SPR_SAKA_JUMP = makeSaka(['...ssssss...', '..ss....ss..', '..bb....bb..']);
+
+/* --- Враг: 10 x 12 --- */
+const SPR_ENEMY = [
+  '..hhhhhh..',
+  '.hhhhhhhh.',
+  '.hssssssh.',
+  '.hsessesh.',
+  '.hssssssh.',
+  '..ssssss..',
+  '.wwwwwwww.',
+  'wwwwwwwwww',
+  'swwwwwwwws',
+  '.nnnnnnnn.',
+  '.ss....ss.',
+  '.bb....bb.',
+];
+
+const PW = 12 * PIXEL;
+const PH = 16 * PIXEL;
+const EW = 10 * PIXEL;
+const EH = 12 * PIXEL;
+
+/* =========================================================
+   4. АУДИО
+   ========================================================= */
+let actx = null;
+function initAudio() {
+  if (actx) return;
+  try { actx = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) {}
+}
+function beep(freq, dur, type = 'square', vol = 0.05) {
+  if (!actx) return;
+  const o = actx.createOscillator();
+  const g = actx.createGain();
+  o.type = type; o.frequency.value = freq; g.gain.value = vol;
+  o.connect(g); g.connect(actx.destination);
+  o.start();
+  g.gain.exponentialRampToValueAtTime(0.0001, actx.currentTime + dur);
+  o.stop(actx.currentTime + dur);
+}
+
+/* =========================================================
+   5. ВВОД
+   ========================================================= */
+const input = { left: false, right: false, jump: false, jumpBuffer: 0, confirm: false };
+
+window.addEventListener('keydown', e => {
+  initAudio();
+  const c = e.code;
+  if (['ArrowLeft','ArrowRight','ArrowUp','ArrowDown','Space'].includes(c)) e.preventDefault();
+  if (c === 'ArrowLeft'  || c === 'KeyA') input.left  = true;
+  if (c === 'ArrowRight' || c === 'KeyD') input.right = true;
+  if (c === 'ArrowUp' || c === 'KeyW' || c === 'Space') {
+    if (!e.repeat) { input.jump = true; input.jumpBuffer = JUMP_BUFFER; }
+  }
+  if ((c === 'Enter' || c === 'Space') && !e.repeat) input.confirm = true;
+});
+
+window.addEventListener('keyup', e => {
+  const c = e.code;
+  if (c === 'ArrowLeft'  || c === 'KeyA') input.left  = false;
+  if (c === 'ArrowRight' || c === 'KeyD') input.right = false;
+  if (c === 'ArrowUp' || c === 'KeyW' || c === 'Space') input.jump = false;
+});
+
+/* =========================================================
+   6. СОСТОЯНИЕ
+   ========================================================= */
+const G = {
+  screen: 'menu',  // menu | vs | playing | levelComplete | gameover | victory
+  level: 1,
+  lives: 3,
+  score: 0,
+  timeLeft: LEVEL_TIME,
+  vsTimer: 0,
+};
+
+let level = null;
+let player = null;
+let camera = { x: 0 };
+let deathTimer = 0;
+let tick = 0;
+
+/* =========================================================
+   7. УТИЛИТЫ
+   ========================================================= */
+function rectsOverlap(a, b) {
+  return a.x < b.x + b.w && a.x + a.w > b.x &&
+         a.y < b.y + b.h && a.y + a.h > b.y;
+}
+function mulberry32(a) {
+  return function () {
+    a |= 0; a = a + 0x6D2B79F5 | 0;
+    let t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+
+/* =========================================================
+   8. ГЕНЕРАЦИЯ УРОВНЯ
+   ========================================================= */
+function generateLevel(num) {
+  const rnd = mulberry32(1337 + num * 7919);
+  const platforms = [];
+  const enemies = [];
+  const groundH = H - GROUND_Y + 80;
+  const club = CLUBS[num - 1];
+
+  let x = 0;
+  const startW = 420;
+  platforms.push({ x, y: GROUND_Y, w: startW, h: groundH, type: 'ground' });
+  const spawn = { x: 90, y: GROUND_Y - PH };
+  x += startW;
+
+  const segments = 4 + num * 2;
+  const minGap   = 55;
+  const maxGap   = 65 + num * 11;
+
+  for (let i = 0; i < segments; i++) {
+    x += minGap + rnd() * (maxGap - minGap);
+    const w = 170 + rnd() * (240 - num * 14);
+    platforms.push({ x, y: GROUND_Y, w, h: groundH, type: 'ground' });
+
+    if (rnd() < 0.35 + num * 0.07) {
+      const fw = 90 + rnd() * 90;
+      const fx = x + 30 + rnd() * Math.max(10, w - fw - 60);
+      const fy = GROUND_Y - (75 + rnd() * 40);
+      platforms.push({ x: fx, y: fy, w: fw, h: 18, type: 'float' });
+    }
+
+    let count = 0;
+    if (rnd() < 0.30 + num * 0.10) count = 1;
+    if (rnd() < num * 0.08) count = 2;
+
+    for (let k = 0; k < count; k++) {
+      const ex = x + 30 + rnd() * Math.max(10, w - EW - 60);
+      enemies.push({
+        x: ex,
+        y: GROUND_Y - EH,
+        w: EW, h: EH,
+        vx: (rnd() < 0.5 ? -1 : 1) * (1.0 + num * 0.20),
+        minX: x + 20,
+        maxX: x + w - 20,
+        anim: 0,
+        dead: false,
+        pal: makeEnemyPal(club),
+      });
+    }
+    x += w;
+  }
+
+  x += 70;
+  const finalW = 460;
+  platforms.push({ x, y: GROUND_Y, w: finalW, h: groundH, type: 'ground' });
+  const goal = { x: x + finalW - 130, y: GROUND_Y - 120, w: 36, h: 120 };
+  x += finalW;
+
+  return { num, width: x + 220, platforms, enemies, goal, spawn, club };
+}
+
+/* =========================================================
+   9. СОЗДАНИЕ ИГРОКА
+   ========================================================= */
+function createPlayer(spawn) {
+  return {
+    x: spawn.x, y: spawn.y, w: PW, h: PH,
+    vx: 0, vy: 0, onGround: false, facing: 1,
+    coyote: 0, jumping: false, anim: 0, invuln: 0,
+  };
+}
+
+/* =========================================================
+   10. УПРАВЛЕНИЕ УРОВНЯМИ
+   ========================================================= */
+function startLevel(n) {
+  G.level = n;
+  level = generateLevel(n);
+  player = createPlayer(level.spawn);
+  camera.x = 0;
+  deathTimer = 0;
+  G.timeLeft = LEVEL_TIME;
+  input.left = input.right = input.jump = false;
+  input.jumpBuffer = 0;
+  input.confirm = false;
+  G.screen = 'vs';
+  G.vsTimer = 0;
+}
+
+function startGame() {
+  G.lives = 3;
+  G.score = 0;
+  startLevel(1);
+}
+
+function respawn() {
+  player.x = level.spawn.x;
+  player.y = level.spawn.y;
+  player.vx = 0; player.vy = 0;
+  player.onGround = false;
+  player.invuln = 100;
+  deathTimer = 0;
+  camera.x = 0;
+  G.timeLeft = LEVEL_TIME;
+}
+
+function killPlayer() {
+  if (deathTimer > 0 || player.invuln > 0) return;
+  G.lives--;
+  beep(220, 0.28, 'sawtooth', 0.07);
+  if (G.lives <= 0) { G.screen = 'gameover'; return; }
+  deathTimer = 50;
+  player.vy = -9;
+  player.vx = 0;
+}
+
+/* =========================================================
+   11. UPDATE
+   ========================================================= */
+function updatePlaying() {
+  const p = player;
+  if (deathTimer > 0) {
+    deathTimer--;
+    p.vy = Math.min(p.vy + GRAVITY, MAX_FALL);
+    p.y += p.vy;
+    if (deathTimer === 0) respawn();
+    return;
+  }
+
+  G.timeLeft--;
+  if (G.timeLeft <= 0) { G.timeLeft = 0; killPlayer(); return; }
+
+  let dir = 0;
+  if (input.left)  dir--;
+  if (input.right) dir++;
+  p.vx = dir * MOVE_SPEED;
+  if (dir !== 0) p.facing = dir;
+
+  if (p.onGround) p.coyote = COYOTE_TIME;
+  else if (p.coyote > 0) p.coyote--;
+
+  if (input.jumpBuffer > 0 && p.coyote > 0) {
+    p.vy = JUMP_V; p.onGround = false; p.coyote = 0;
+    p.jumping = true; input.jumpBuffer = 0;
+    beep(520, 0.09, 'square', 0.04);
+  } else if (input.jumpBuffer > 0) input.jumpBuffer--;
+
+  if (p.jumping && !input.jump && p.vy < -3.5) {
+    p.vy = -3.5; p.jumping = false;
+  }
+  if (p.vy >= 0) p.jumping = false;
+
+  p.vy = Math.min(p.vy + GRAVITY, MAX_FALL);
+
+  p.x += p.vx;
+  for (const pl of level.platforms) {
+    if (rectsOverlap(p, pl)) {
+      if (p.vx > 0)      p.x = pl.x - p.w;
+      else if (p.vx < 0) p.x = pl.x + pl.w;
+      p.vx = 0;
+    }
+  }
+
+  p.y += p.vy;
+  p.onGround = false;
+  for (const pl of level.platforms) {
+    if (rectsOverlap(p, pl)) {
+      if (p.vy > 0) { p.y = pl.y - p.h; p.vy = 0; p.onGround = true; }
+      else if (p.vy < 0) { p.y = pl.y + pl.h; p.vy = 0; }
+    }
+  }
+
+  if (p.x < 0) p.x = 0;
+  if (p.invuln > 0) p.invuln--;
+  if (p.y > H + 140) { killPlayer(); return; }
+
+  if (p.onGround && dir !== 0) p.anim += 0.25;
+  else if (p.onGround) p.anim = 0;
+
+  for (const e of level.enemies) {
+    if (e.dead) continue;
+    e.x += e.vx;
+    if (e.x < e.minX)       { e.x = e.minX;        e.vx =  Math.abs(e.vx); }
+    if (e.x + e.w > e.maxX) { e.x = e.maxX - e.w;  e.vx = -Math.abs(e.vx); }
+    e.anim += 0.15;
+    if (p.invuln > 0) continue;
+    if (!rectsOverlap(p, e)) continue;
+    const prevBottom = p.y + p.h - p.vy;
+    if (p.vy > 0 && prevBottom <= e.y + 14) {
+      e.dead = true; p.vy = -10.5; p.jumping = false;
+      G.score += 100;
+      beep(320, 0.07, 'square', 0.05);
+      beep(180, 0.10, 'square', 0.04);
+    } else { killPlayer(); return; }
+  }
+
+  if (rectsOverlap(p, level.goal)) {
+    G.score += 500;
+    beep(660, 0.10, 'square', 0.05);
+    beep(880, 0.16, 'square', 0.05);
+    G.screen = 'levelComplete';
+    return;
+  }
+
+  camera.x = Math.max(0, Math.min(p.x + p.w / 2 - W / 2, level.width - W));
+}
+
+function update() {
+  switch (G.screen) {
+    case 'menu':
+      if (input.confirm) startGame();
+      break;
+    case 'vs':
+      G.vsTimer++;
+      if (input.confirm && G.vsTimer > 25) { G.screen = 'playing'; }
+      break;
+    case 'playing':
+      updatePlaying();
+      break;
+    case 'levelComplete':
+      if (input.confirm) {
+        if (G.level >= TOTAL_LEVELS) G.screen = 'victory';
+        else startLevel(G.level + 1);
+      }
+      break;
+    case 'gameover':
+      if (input.confirm) { G.lives = 3; startLevel(G.level); }
+      break;
+    case 'victory':
+      if (input.confirm) { G.screen = 'menu'; }
+      break;
+  }
+  input.confirm = false;
+}
+
+/* =========================================================
+   12. ОТРИСОВКА СПРАЙТОВ
+   ========================================================= */
+function drawSprite(spr, pal, x, y, scale, flip) {
+  const cols = spr[0].length;
+  for (let r = 0; r < spr.length; r++) {
+    const row = spr[r];
+    for (let c = 0; c < cols; c++) {
+      const ch = row[c];
+      if (ch === '.') continue;
+      const color = pal[ch];
+      if (!color) continue;
+      const px = flip ? (cols - 1 - c) : c;
+      ctx.fillStyle = color;
+      ctx.fillRect(x + px * scale, y + r * scale, scale, scale);
+    }
+  }
+}
+
+/* =========================================================
+   13. ФОН: ТРИБУНЫ «ЭМИРЕЙТС»
+   ========================================================= */
+const crowd = [];
+for (let i = 0; i < 520; i++) {
+  crowd.push({
+    x: (i * 137) % 2600,
+    y: 232 + ((i * 89) % 168),
+    c: ['#e57373','#64b5f6','#fff176','#ba68c8','#ffffff','#4db6ac','#ff8a65','#e01b24','#ffffff'][i % 9],
+    tier: Math.random() < 0.5 ? 0 : 1,
+  });
+}
+
+const BOARDS = ['ARSENAL', 'EMIRATES', 'FLY BETTER', 'ARSENAL', 'EMIRATES', 'FLY BETTER'];
+
+function drawStadium(cam) {
+  ctx.fillStyle = '#1a242c';
+  ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = '#22303a';
+  ctx.fillRect(0, 0, W, 210);
+
+  ctx.strokeStyle = '#37474f';
+  ctx.lineWidth = 2;
+  for (let i = -1; i < 26; i++) {
+    const bx = ((i * 90) - cam * 0.1) % (26 * 90);
+    ctx.beginPath();
+    ctx.moveTo(bx, 0);
+    ctx.lineTo(bx + 40, 60);
+    ctx.stroke();
+  }
+  ctx.fillStyle = '#37474f';
+  ctx.fillRect(0, 58, W, 8);
+
+  ctx.fillStyle = '#37474f';
+  ctx.fillRect(0, 66, W, 130);
+
+  ctx.fillStyle = '#455a64';
+  for (let yy = 76; yy < 190; yy += 10) ctx.fillRect(0, yy, W, 4);
+
+  const offTop = -(cam * 0.25) % 2600;
+  for (const c of crowd) {
+    if (c.tier !== 0) continue;
+    const x = c.x + offTop;
+    if (x < -6 || x > W + 6) continue;
+    ctx.fillStyle = c.c;
+    ctx.fillRect(Math.round(x), c.y, 4, 4);
+    ctx.fillRect(Math.round(x), c.y - 3, 4, 3);
+  }
+
+  ctx.fillStyle = '#101820';
+  ctx.fillRect(0, 196, W, 14);
+
+  const bannerOff = -(cam * 0.2) % 620;
+  ctx.font = 'bold 14px monospace';
+  ctx.textBaseline = 'middle';
+  for (let i = -1; i < 4; i++) {
+    const bx = bannerOff + i * 620;
+    ctx.fillStyle = '#b71c1c';
+    ctx.fillRect(bx, 196, 560, 14);
+    ctx.fillStyle = '#ffffff';
+    ctx.fillText('EMIRATES STADIUM  ·  HOME OF ARSENAL  ·  NORTH LONDON IS RED', bx + 14, 203);
+  }
+
+  ctx.fillStyle = '#2b3a44';
+  ctx.fillRect(0, 210, W, 200);
+  ctx.fillStyle = '#3a4d59';
+  for (let yy = 218; yy < 400; yy += 11) ctx.fillRect(0, yy, W, 5);
+
+  const offBot = -(cam * 0.4) % 2600;
+  for (const c of crowd) {
+    if (c.tier !== 1) continue;
+    const x = c.x + offBot;
+    const y = c.y + 6;
+    if (x < -6 || x > W + 6) continue;
+    ctx.fillStyle = c.c;
+    ctx.fillRect(Math.round(x), y, 5, 5);
+    ctx.fillRect(Math.round(x), y - 4, 5, 4);
+  }
+
+  ctx.fillStyle = '#0f1a22';
+  ctx.fillRect(0, 400, W, 30);
+  const boardW = 200;
+  const boff = -(cam * 0.6) % (boardW * BOARDS.length);
+  ctx.font = 'bold 16px monospace';
+  for (let i = -1; i < BOARDS.length + 4; i++) {
+    const bx = boff + i * boardW;
+    ctx.fillStyle = i % 2 ? '#e01b24' : '#ffffff';
+    ctx.fillRect(bx, 404, boardW - 6, 22);
+    ctx.fillStyle = i % 2 ? '#ffffff' : '#e01b24';
+    ctx.fillText(BOARDS[i % BOARDS.length], bx + 16, 416);
+  }
+  ctx.textBaseline = 'alphabetic';
+}
+
+/* =========================================================
+   14. ПЛАТФОРМЫ, ФЛАГ
+   ========================================================= */
+function drawGround(p, x) {
+  ctx.fillStyle = '#1f6b2e';
+  ctx.fillRect(x, p.y, p.w, p.h);
+  ctx.fillStyle = '#2a8a3c';
+  for (let i = 0; i < p.w; i += 96) {
+    ctx.fillRect(x + i, p.y, Math.min(48, p.w - i), p.h);
+  }
+  ctx.fillStyle = '#54c866';
+  ctx.fillRect(x, p.y, p.w, 14);
+  ctx.fillStyle = '#7de88d';
+  ctx.fillRect(x, p.y, p.w, 5);
+  ctx.fillStyle = '#144a20';
+  ctx.fillRect(x, p.y + p.h - 32, p.w, 32);
+}
+function drawFloat(p, x) {
+  ctx.fillStyle = '#1f6b2e';
+  ctx.fillRect(x, p.y, p.w, p.h);
+  ctx.fillStyle = '#54c866';
+  ctx.fillRect(x, p.y, p.w, 7);
+  ctx.fillStyle = '#7de88d';
+  ctx.fillRect(x, p.y, p.w, 3);
+  ctx.fillStyle = '#144a20';
+  ctx.fillRect(x, p.y + p.h - 5, p.w, 5);
+}
+
+function drawGoal(g, cam) {
+  const x = Math.round(g.x - cam);
+  ctx.fillStyle = '#d8d8d8';
+  ctx.fillRect(x, g.y, 7, g.h);
+  ctx.fillStyle = '#8e8e8e';
+  ctx.fillRect(x + 7, g.y, 3, g.h);
+  ctx.fillStyle = '#ffd54f';
+  ctx.fillRect(x - 4, g.y - 12, 15, 12);
+  const wave = Math.sin(tick * 0.09) * 5;
+  ctx.fillStyle = '#e01b24';
+  ctx.beginPath();
+  ctx.moveTo(x + 10, g.y + 10);
+  ctx.lineTo(x + 74 + wave, g.y + 30);
+  ctx.lineTo(x + 10, g.y + 50);
+  ctx.closePath(); ctx.fill();
+  ctx.fillStyle = '#ffffff';
+  ctx.beginPath();
+  ctx.moveTo(x + 10, g.y + 24);
+  ctx.lineTo(x + 62 + wave, g.y + 30);
+  ctx.lineTo(x + 10, g.y + 36);
+  ctx.closePath(); ctx.fill();
+}
+
+/* =========================================================
+   15. МИР
+   ========================================================= */
+function drawWorld() {
+  const cam = camera.x;
+  drawStadium(cam);
+
+  for (const p of level.platforms) {
+    const x = Math.round(p.x - cam);
+    if (x > W || x + p.w < 0) continue;
+    if (p.type === 'ground') drawGround(p, x);
+    else                     drawFloat(p, x);
+  }
+  drawGoal(level.goal, cam);
+
+  for (const e of level.enemies) {
+    if (e.dead) continue;
+    const x = Math.round(e.x - cam);
+    if (x > W || x + e.w < 0) continue;
+    const bob = Math.round(Math.sin(e.anim) * 1.5);
+    drawSprite(SPR_ENEMY, e.pal, x, Math.round(e.y) + bob, PIXEL, e.vx < 0);
+  }
+
+  const blinking = player.invuln > 0 && deathTimer === 0 &&
+                   Math.floor(player.invuln / 4) % 2 === 0;
+  if (!blinking) {
+    let spr;
+    if (!player.onGround) spr = SPR_SAKA_JUMP;
+    else if (Math.abs(player.vx) > 0.1) spr = SPR_SAKA_RUN[Math.floor(player.anim) % 2];
+    else spr = SPR_SAKA_RUN[0];
+    drawSprite(spr, PAL_PLAYER,
+      Math.round(player.x - cam),
+      Math.round(player.y),
+      PIXEL,
+      player.facing < 0);
+  }
+}
+
+/* =========================================================
+   16. HUD
+   ========================================================= */
+function drawHUD() {
+  ctx.fillStyle = 'rgba(10, 16, 22, 0.65)';
+  ctx.fillRect(14, 14, 460, 46);
+
+  ctx.textBaseline = 'middle';
+  ctx.font = 'bold 18px monospace';
+  ctx.textAlign = 'left';
+  ctx.fillStyle = '#ffffff';
+  ctx.fillText(`УР. ${G.level}/${TOTAL_LEVELS}  ${level.club.name}`, 28, 32);
+
+  ctx.fillStyle = '#9fe870';
+  ctx.fillText(`ОЧКИ ${G.score}`, 28, 52);
+
+  const sec = Math.ceil(G.timeLeft / 60);
+  ctx.fillStyle = sec < 20 ? '#ff5252' : '#ffd54f';
+  ctx.font = 'bold 22px monospace';
+  ctx.fillText(`${String(Math.floor(sec / 60)).padStart(2,'0')}:${String(sec % 60).padStart(2,'0')}`, 320, 42);
+
+  for (let i = 0; i < G.lives; i++) {
+    const hx = 420 + i * 34;
+    ctx.fillStyle = '#e01b24';
+    ctx.fillRect(hx, 26, 22, 22);
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(hx + 4, 30, 14, 6);
+  }
+  ctx.textBaseline = 'alphabetic';
+}
+
+/* =========================================================
+   17. ПИКСЕЛЬНЫЕ БЕЙДЖИ КЛУБОВ
+   ========================================================= */
+function drawBadge(club, cx, cy, s) {
+  const size = 8 * s;
+  const x = cx - size / 2;
+  const y = cy - size / 2;
+
+  ctx.fillStyle = 'rgba(0,0,0,0.55)';
+  ctx.fillRect(x - 3, y - 3, size + 6, size + 6);
+
+  ctx.fillStyle = club.accent;
+  ctx.fillRect(x, y, size, size * 0.75);
+  ctx.beginPath();
+  ctx.moveTo(x, y + size * 0.75);
+  ctx.lineTo(x + size / 2, y + size);
+  ctx.lineTo(x + size, y + size * 0.75);
+  ctx.closePath();
+  ctx.fill();
+
+  if (club.key === 'TOT') {
+    ctx.fillStyle = '#1a1a3c';
+    ctx.fillRect(x + size * 0.42, y + size * 0.20, size * 0.16, size * 0.30);
+    ctx.fillRect(x + size * 0.52, y + size * 0.14, size * 0.10, size * 0.10);
+    ctx.fillRect(x + size * 0.34, y + size * 0.50, size * 0.32, size * 0.10);
+  } else if (club.key === 'WHU') {
+    ctx.save();
+    ctx.translate(cx, cy - size * 0.12);
+    ctx.fillStyle = '#ffffff';
+    for (const ang of [-0.6, 0.6]) {
+      ctx.rotate(ang);
+      ctx.fillRect(-size * 0.04, -size * 0.35, size * 0.08, size * 0.45);
+      ctx.fillRect(-size * 0.18, -size * 0.38, size * 0.36, size * 0.10);
+      ctx.rotate(-ang);
+    }
+    ctx.restore();
+  } else if (club.key === 'CRY') {
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(x + size * 0.20, y + size * 0.35, size * 0.60, size * 0.10);
+    ctx.fillRect(x + size * 0.40, y + size * 0.25, size * 0.20, size * 0.30);
+    ctx.fillRect(x + size * 0.45, y + size * 0.18, size * 0.10, size * 0.10);
+    ctx.fillRect(x + size * 0.22, y + size * 0.30, size * 0.10, size * 0.14);
+    ctx.fillRect(x + size * 0.68, y + size * 0.30, size * 0.10, size * 0.14);
+  } else if (club.key === 'CHE') {
+    ctx.fillStyle = '#ffffff';
+    ctx.beginPath();
+    ctx.arc(cx, cy - size * 0.12, size * 0.22, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = club.shirt;
+    ctx.beginPath();
+    ctx.arc(cx, cy - size * 0.12, size * 0.13, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  ctx.strokeStyle = '#ffffff';
+  ctx.lineWidth = 2;
+  ctx.strokeRect(x, y, size, size * 0.75);
+
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.font = `bold ${Math.round(2.6 * s)}px monospace`;
+  ctx.fillStyle = '#ffffff';
+  ctx.fillText(club.short, cx, y + size + 2.6 * s);
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'alphabetic';
+}
+
+/* =========================================================
+   18. ЭКРАН VS
+   ========================================================= */
+function drawVS() {
+  const club = CLUBS[G.level - 1];
+
+  // Фон — стадион
+  drawStadium(0);
+
+  // Затемнение
+  ctx.fillStyle = 'rgba(8,12,20,0.72)';
+  ctx.fillRect(0, 0, W, H);
+
+  const cx = W / 2;
+
+  // Заголовок
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = '#ffd54f';
+  ctx.font = 'bold 26px monospace';
+  ctx.fillText(`УРОВЕНЬ ${G.level}`, cx, 60);
+
+  ctx.fillStyle = '#ffffff';
+  ctx.font = 'bold 40px monospace';
+  ctx.fillText('ЛОНДОНСКОЕ ДЕРБИ', cx, 105);
+
+  // Игрок слева
+  const sakaBob = Math.round(Math.sin(G.vsTimer * 0.1) * 3);
+  drawSprite(SPR_SAKA_RUN[0], PAL_PLAYER, cx - 260, 220 + sakaBob, PIXEL * 2, false);
+  ctx.fillStyle = '#e01b24';
+  ctx.font = 'bold 24px monospace';
+  ctx.fillText('ARSENAL', cx - 222, 390);
+  ctx.fillStyle = '#ffffff';
+  ctx.font = 'bold 16px monospace';
+  ctx.fillText('SAKA', cx - 222, 415);
+
+    // Враг справа
+  const epal = makeEnemyPal(club);
+  const enemyBob = Math.round(Math.sin(G.vsTimer * 0.1 + 1) * 3);
+  drawSprite(SPR_ENEMY, epal, cx + 196, 232 + enemyBob, PIXEL * 2, true);
+  ctx.fillStyle = club.accent === '#ffffff' ? '#ffffff' : club.shirt;
+  ctx.font = 'bold 24px monospace';
+  ctx.fillText(club.short, cx + 222, 390);
+  ctx.fillStyle = '#ffffff';
+  ctx.font = 'bold 16px monospace';
+  ctx.fillText(club.tag, cx + 222, 415);
+
+  // VS по центру
+  ctx.fillStyle = '#ffd54f';
+  ctx.font = 'bold 84px monospace';
+  ctx.fillText('VS', cx, 290);
+
+  // Пиксельные бейджи клубов по центру сверху
+  drawBadge(CLUBS[0] && { key: 'ARS', short: 'ARS', accent: '#e01b24', shirt: '#e01b24' }, cx - 60, 470, 4);
+  drawBadge(club, cx + 60, 470, 4);
+
+  ctx.fillStyle = Math.floor(G.vsTimer / 25) % 2 ? '#9fe870' : '#ffffff';
+  ctx.font = 'bold 20px monospace';
+  ctx.fillText('ПРОБЕЛ / ENTER — НАЧАТЬ МАТЧ', cx, 510);
+
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'alphabetic';
+}
+
+/* =========================================================
+   19. ЭКРАН ПОБЕДЫ С КУБКОМ ЛОНДОНА
+   ========================================================= */
+function drawTrophy(cx, cy) {
+  // подставка
+  ctx.fillStyle = '#8d6e63';
+  ctx.fillRect(cx - 34, cy + 62, 68, 12);
+  ctx.fillStyle = '#5d4037';
+  ctx.fillRect(cx - 26, cy + 74, 52, 10);
+  ctx.fillStyle = '#3e2723';
+  ctx.fillRect(cx - 26, cy + 84, 52, 6);
+
+  // ножка
+  ctx.fillStyle = '#ffd54f';
+  ctx.fillRect(cx - 8, cy + 34, 16, 30);
+  ctx.fillStyle = '#e6b800';
+  ctx.fillRect(cx - 8, cy + 34, 5, 30);
+
+  // чаша
+  ctx.fillStyle = '#ffd54f';
+  ctx.beginPath();
+  ctx.moveTo(cx - 44, cy - 22);
+  ctx.lineTo(cx + 44, cy - 22);
+  ctx.quadraticCurveTo(cx + 44, cy + 26, cx + 8, cy + 34);
+  ctx.lineTo(cx - 8, cy + 34);
+  ctx.quadraticCurveTo(cx - 44, cy + 26, cx - 44, cy - 22);
+  ctx.closePath();
+  ctx.fill();
+
+  // блик
+  ctx.fillStyle = '#fff59d';
+  ctx.beginPath();
+  ctx.moveTo(cx - 34, cy - 16);
+  ctx.lineTo(cx - 18, cy - 16);
+  ctx.lineTo(cx - 26, cy + 22);
+  ctx.lineTo(cx - 38, cy + 6);
+  ctx.closePath();
+  ctx.fill();
+
+  // ручки
+  ctx.strokeStyle = '#ffd54f';
+  ctx.lineWidth = 7;
+  ctx.beginPath();
+  ctx.arc(cx - 46, cy - 2, 18, Math.PI * 0.55, Math.PI * 1.45);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.arc(cx + 46, cy - 2, 18, Math.PI * 1.55, Math.PI * 0.45);
+  ctx.stroke();
+
+  // верхний обод
+  ctx.fillStyle = '#fff176';
+  ctx.fillRect(cx - 48, cy - 28, 96, 10);
+
+  // надпись на кубке
+  ctx.fillStyle = '#3e2723';
+  ctx.font = 'bold 12px monospace';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('CUP', cx, cy + 2);
+  ctx.fillText('LONDON', cx, cy + 16);
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'alphabetic';
+}
+
+function drawVictory() {
+  // Стадион и затемнение
+  drawStadium(0);
+  ctx.fillStyle = 'rgba(8,12,20,0.80)';
+  ctx.fillRect(0, 0, W, H);
+
+  const cx = W / 2;
+
+  // Заголовок
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = '#ffd54f';
+  ctx.font = 'bold 54px monospace';
+  ctx.fillText('CUP LONDON', cx, 70);
+
+  ctx.fillStyle = '#e01b24';
+  ctx.font = 'bold 28px monospace';
+  ctx.fillText('КУБОК ЛОНДОНА', cx, 115);
+
+  // Конфетти
+  for (let i = 0; i < 80; i++) {
+    const t = tick * 0.03 + i * 1.7;
+    const x = (i * 97 + Math.sin(t) * 60) % W;
+    const y = (i * 53 + tick * (1 + (i % 5) * 0.4)) % H;
+    ctx.fillStyle = ['#e01b24','#ffffff','#ffd54f','#9fe870','#64b5f6'][i % 5];
+    ctx.fillRect(x, y, 5, 5);
+  }
+
+  // Сака с кубком
+  const bob = Math.round(Math.sin(tick * 0.06) * 3);
+  drawTrophy(cx - 110, 290 + bob);
+  drawSprite(SPR_SAKA_RUN[0], PAL_PLAYER, cx + 30, 300 + bob, PIXEL * 3, false);
+
+  // Подписи
+  ctx.fillStyle = '#ffffff';
+  ctx.font = 'bold 24px monospace';
+  ctx.fillText('BUKAYO SAKA', cx + 84, 470);
+
+  ctx.fillStyle = Math.floor(tick / 30) % 2 ? '#9fe870' : '#ffffff';
+  ctx.font = 'bold 20px monospace';
+  ctx.fillText('ПРОБЕЛ / ENTER — В МЕНЮ', cx, 510);
+
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'alphabetic';
+}
+
+/* =========================================================
+   20. ЭКРАНЫ-ОВЕРЛЕИ
+   ========================================================= */
+function drawOverlay(title, titleColor, subtitle, hint) {
+  ctx.fillStyle = 'rgba(8, 12, 20, 0.80)';
+  ctx.fillRect(0, 0, W, H);
+
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+
+  ctx.fillStyle = titleColor;
+  ctx.font = 'bold 62px monospace';
+  ctx.fillText(title, W / 2, H / 2 - 90);
+
+  ctx.fillStyle = '#ffffff';
+  ctx.font = 'bold 26px monospace';
+  ctx.fillText(subtitle, W / 2, H / 2 - 5);
+
+  ctx.fillStyle = '#9fe870';
+  ctx.font = 'bold 22px monospace';
+  ctx.fillText(hint, W / 2, H / 2 + 85);
+
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'alphabetic';
+}
+
+/* =========================================================
+   21. МЕНЮ
+   ========================================================= */
+function drawMenu() {
+  // Стадион на фоне
+  drawStadium(0);
+
+  // Затемнение
+  ctx.fillStyle = 'rgba(8,12,20,0.55)';
+  ctx.fillRect(0, 0, W, H);
+
+  // Сака на поле
+  const bob = Math.round(Math.sin(tick * 0.05) * 3);
+  drawSprite(SPR_SAKA_RUN[0], PAL_PLAYER, W / 2 - 18, 400 - PH + bob, PIXEL, false);
+
+  // Заголовок
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+
+  ctx.fillStyle = 'rgba(10,16,22,0.75)';
+  ctx.fillRect(0, 110, W, 160);
+
+  ctx.fillStyle = '#e01b24';
+  ctx.font = 'bold 64px monospace';
+  ctx.fillText('BUKAYO SAKA', W / 2, 155);
+
+  ctx.fillStyle = '#ffffff';
+  ctx.font = 'bold 30px monospace';
+  ctx.fillText('LONDON DERBY RUN', W / 2, 205);
+
+  ctx.fillStyle = '#ffd54f';
+  ctx.font = 'bold 18px monospace';
+  ctx.fillText('ТОТТЕНХЭМ · ВЕСТ ХЭМ · КРИСТАЛ ПЭЛАС · ЧЕЛСИ', W / 2, 240);
+
+  ctx.fillStyle = 'rgba(10,16,22,0.7)';
+  ctx.fillRect(0, 460, W, 80);
+
+  ctx.fillStyle = Math.floor(tick / 30) % 2 ? '#9fe870' : '#ffffff';
+  ctx.font = 'bold 24px monospace';
+  ctx.fillText('НАЖМИ ПРОБЕЛ / ENTER — НАЧАТЬ', W / 2, 495);
+
+  ctx.fillStyle = '#cfd8dc';
+  ctx.font = 'bold 16px monospace';
+  ctx.fillText('← → / A D — бег    ↑ / W / SPACE — прыжок    прыгай на врагов сверху', W / 2, 527);
+
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'alphabetic';
+}
+
+/* =========================================================
+   22. RENDER
+   ========================================================= */
+function render() {
+  if (G.screen === 'menu')         { drawMenu();         return; }
+  if (G.screen === 'victory')      { drawVictory();      return; }
+  if (G.screen === 'vs')           { drawVS();           return; }
+
+  drawWorld();
+  drawHUD();
+
+  if (G.screen === 'levelComplete') {
+    drawOverlay(
+      `УРОВЕНЬ ${G.level} ПРОЙДЕН!`,
+      '#9fe870',
+      `Побеждён: ${level.club.name}   ·   Очки: ${G.score}`,
+      'ПРОБЕЛ / ENTER — ДАЛЬШЕ'
+    );
+  } else if (G.screen === 'gameover') {
+    drawOverlay(
+      'GAME OVER',
+      '#ff5252',
+      `Очки: ${G.score}`,
+      'ПРОБЕЛ / ENTER — ПОВТОРИТЬ УРОВЕНЬ'
+    );
+  }
+}
+
+/* =========================================================
+   23. ГЛАВНЫЙ ЦИКЛ
+   ========================================================= */
+const STEP = 1000 / 60;
+let lastTime = performance.now();
+let acc = 0;
+
+function loop(now) {
+  const dt = Math.min(now - lastTime, 120);
+  lastTime = now;
+  acc += dt;
+
+  while (acc >= STEP) {
+    update();
+    tick++;
+    acc -= STEP;
+  }
+
+  render();
+  requestAnimationFrame(loop);
+}
+
+requestAnimationFrame(loop);
+
+})();
+</script>
+</body>
+</html>
